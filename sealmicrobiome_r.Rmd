@@ -1,0 +1,1254 @@
+---
+title: "AFS_microbiome"
+author: "Erin D'Agnese"
+date: "5/15/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Final script for the Australian Fur Seal microbiome analysis and the comparison to farmed salmon microbiomes
+
+First start with setting the working directory
+
+
+load packages needed for the analysis
+```{r}
+library(here)
+library(tidyverse)
+#devtools::install_github("jbisanz/qiime2R")
+library(qiime2R)
+library(phyloseq)
+library(scales)
+library(ggpubr)
+library(ggVennDiagram)
+library(Polychrome)
+```
+Next import the seal only data
+```{r}
+SOmetadata<-read_tsv(here("Sealseqs","seal.metadata.tsv"))
+SOmetadata
+SOSVs<-read_qza(here("Sealseqs", "table.qza"))
+SOtaxonomy<-read_qza(here("Sealseqs","SILVA138-seal-taxonomy.qza"))
+SOtaxtable<-SOtaxonomy$data %>% as_tibble() %>% separate(Taxon, sep=";", c("Kingdom","Phylum","Class","Order","Family","Genus","Species")) #convert the table into a tabular split version
+SOtree<-read_qza(here("Sealseqs","rooted-tree.qza"))
+SOshannon<-read_qza(here("Sealseqs", "core-metrics-results","shannon_vector.qza"))
+SObc <- read_qza(here("Sealseqs", "core-metrics-results", "bray_curtis_distance_matrix.qza"))
+
+SOasv <- SOSVs$data %>% as.data.frame()
+SOasv <- SOSVs$data %>% as_tibble(rownames = "ASV.id")
+
+#use SOasv and SOtaxtable as the objects for all the other analyses and to merge the salmon data in
+
+Salmetadata<-read_tsv(here("SalmonSeqs", "salmon.metadata.tsv"))
+Salmetadata
+SalSVs<-read_qza(here("SalmonSeqs","table.qza"))
+Saltaxonomy<-read_qza(here("SalmonSeqs","taxonomy.qza"))
+Saltaxtable<-Saltaxonomy$data %>% as_tibble() %>% separate(Taxon, sep=";", c("Kingdom","Phylum","Class","Order","Family","Genus","Species")) #convert the table into a tabular split version
+Saltree<-read_qza(here("SalmonSeqs","rooted-tree.qza"))
+Salshannon<-read_qza(here("SalmonSeqs", "core-metrics-results" ,"shannon_vector.qza"))
+Salpco<-read_qza(here("SalmonSeqs", "core-metrics-results" ,"unweighted_unifrac_pcoa_results.qza"))
+SalWpco<-read_qza(here("SalmonSeqs", "core-metrics-results" ,"weighted_unifrac_pcoa_results.qza"))
+Salbc <- read_qza(here("SalmonSeqs", "core-metrics-results", "bray_curtis_distance_matrix.qza"))
+
+Salasv <- SalSVs$data %>% as_tibble(rownames = "ASV.id")
+```
+
+then combine them into a phyloseq object
+```{r}
+OTU = otu_table(SOSVs$data, taxa_are_rows = T)
+TAX = tax_table(as.data.frame(SOtaxtable)%>% column_to_rownames("Feature.ID")%>% as.matrix("Taxon"))
+TREE = phy_tree(SOtree$data)
+SAMPLES = sample_data(SOmetadata %>% as.data.frame() %>% column_to_rownames("sample-id"))
+SOphy<- phyloseq(OTU,TAX,TREE,SAMPLES)
+SOphy<- phyloseq(OTU,TAX,SAMPLES)
+#clean up the taxtable so they don't have the k__ extentions in the names
+tax_table(SOphy)[, colnames(tax_table(SOphy))] <- gsub(tax_table(SOphy)[, colnames(tax_table(SOphy))],     pattern = "[a-z]__", replacement = "")
+
+
+
+#remove the mock community samples, the Long-nosed fur seals, and the ASVs assigned
+#to mitochondria and chloroplast
+SOphy %>% 
+  subset_samples(SampleType !="mock") %>%
+  subset_samples(Sample_Species !="LNFS") %>%
+  subset_taxa(Family!= " Mitochondria" | is.na(Family)) %>%
+  subset_taxa(Family!= " Chloroplast" | is.na(Family)) %>%
+  subset_taxa(Kingdom!= "Unassigned" | is.na(Kingdom)) -> SOphy_clean
+
+
+#save the ASV table of only the AFS
+ASV_AFS <- as(otu_table(SOphy_clean), "matrix")
+if(taxa_are_rows(SOphy_clean)){ASV_AFS <- t(ASV_AFS)}
+ASF_ASFdf <- as.data.frame(ASV_AFS)
+
+ASV_ASFdf <- t(ASF_ASFdf)
+ASV_ASFdf %>% as.data.frame()
+
+TotalReads = sample_sums(SOphy_clean)
+min(TotalReads)
+max(TotalReads)
+mean(TotalReads)
+median(TotalReads)
+
+```
+
+Combine the salmon data into a phyloseq object
+```{r}
+SalOTU = otu_table(SalSVs$data, taxa_are_rows = T)
+SalTAX = tax_table(as.data.frame(Saltaxtable)%>% column_to_rownames("Feature.ID")%>% as.matrix("Taxon"))
+SalTREE = phy_tree(Saltree$data)
+SalSAMPLES = sample_data(Salmetadata %>% as.data.frame() %>% column_to_rownames("sample-id"))
+Salphy<- phyloseq(SalOTU,SalTAX,SalTREE,SalSAMPLES)
+Salphy<- phyloseq(SalOTU,SalTAX,SalSAMPLES)
+#clean up the taxtable so they don't have the k__ extentions in the names
+tax_table(Salphy)[, colnames(tax_table(Salphy))] <- gsub(tax_table(Salphy)[, colnames(tax_table(Salphy))],     pattern = "[a-z]__", replacement = "")
+
+Salphy %>%  
+  subset_taxa(Family!= " Mitochondria" | is.na(Family)) %>%
+  subset_taxa(Family!= " Chloroplast" | is.na(Family))  %>%
+  subset_taxa(Kingdom!= "Unassigned" | is.na(Kingdom)) -> Salphy_clean
+
+#save the ASV table of only the AFS
+ASV_Sal <- as(otu_table(Salphy_clean), "matrix")
+if(taxa_are_rows(Salphy_clean)){ASV_Sal <- t(ASV_Sal)}
+ASV_Saldf <- as.data.frame(ASV_Sal)
+
+ASV_Saldf <- t(ASV_Saldf)
+ASV_Saldf %>% as.data.frame()
+
+TotalReads = sample_sums(Salphy_clean)
+min(TotalReads)
+max(TotalReads)
+mean(TotalReads)
+median(TotalReads)
+
+#need to remove low reads <1000
+Salphy_clean_1000 <- subset_samples(Salphy_clean, sample_sums(Salphy_clean) > 1000) 
+
+```
+
+Now that both the seal and salmon runs have been processed separately, and mock community data, and ASVs assigned to chloroplast or mitochondira have been removed let's merge them into one combined large phyloseq object to use for the salmon + seal metrics - leave TREE out of phyloseq object for this. 
+```{r}
+CombinedPhy <- merge_phyloseq(SOphy_clean, Salphy_clean_1000)
+```
+We'll use this later
+
+Calculate richness per group
+```{r}
+#set seed, check the sample with lowest read count
+set.seed(1321)
+
+sort(sample_sums(SOphy_clean))
+
+library(microbiome)
+#make a dataframe with the alpha diversity metrics
+SOphy_clean_alpha.div <- data.frame(
+  sample_data(SOphy_clean),
+  estimate_richness(SOphy_clean, measures=c("Observed","Shannon")))
+
+SOphy_clean_alpha.div %>%
+  rownames_to_column(var="sampleid") -> SO_alpha_div
+
+pairwise.wilcox.test(SO_alpha_div$Observed, SO_alpha_div$SampleType) #p-value = 0.13
+pairwise.wilcox.test(SO_alpha_div$Shannon, SO_alpha_div$SampleType) #p-value = 0.64
+pairwise.wilcox.test(SO_alpha_div$Observed, SO_alpha_div$AdJuv) #p-value = 0.00054**
+pairwise.wilcox.test(SO_alpha_div$Shannon, SO_alpha_div$AdJuv) #p-val = 0.14
+pairwise.wilcox.test(SO_alpha_div$Observed, SO_alpha_div$AnimalStatus) #p-vals 0.40 HOscat-live, 0.95 scat-necro and live-necro
+pairwise.wilcox.test(SO_alpha_div$Shannon, SO_alpha_div$AnimalStatus) # no sig
+pairwise.wilcox.test(SO_alpha_div$Observed, SO_alpha_div$DemoCat) #pvals sig inreg-ctrls and males and ctrljuv
+pairwise.wilcox.test(SO_alpha_div$Shannon, SO_alpha_div$DemoCat) #pvals sig ctrl ad and both in region and males at farms
+
+sort(sample_sums(Salphy_clean_1000))
+Salphy_clean_alpha.div <- data.frame(
+  sample_data(Salphy_clean_1000),
+  estimate_richness(Salphy_clean_1000, measures=c("Observed","Shannon")))
+
+Salphy_clean_alpha.div %>%
+  rownames_to_column(var="sampleid") -> Sal_alpha_div
+
+Sal_alpha_div %>%
+  select(sampleid, SampleType, Sample_Species, AnimalStatus, DemoCat, Observed, Shannon) -> Sal_alpha_div2
+
+SO_alpha_div %>%
+  select(sampleid, SampleType, Sample_Species, AnimalStatus, DemoCat, Observed, Shannon) -> SO_alpha_div2
+
+Combined_alpha <- rbind(Sal_alpha_div2, SO_alpha_div2)
+
+pairwise.wilcox.test(Combined_alpha$Observed, Combined_alpha$DemoCat)
+#no significant differences between salmon and any group of seals
+pairwise.wilcox.test(Combined_alpha$Shannon, Combined_alpha$DemoCat)
+
+```
+
+```{r plotting richness}
+p <- plot_richness(SOphy_clean, x="DemoCat", measures = "Observed") +
+    geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Seal group") +
+  ylab("ASV richness") +
+  geom_bracket(xmin=c("CtrlAd", "CtrlJuv"), xmax="InRegAd", y.position = c(172,184),
+               label = c("***","***"), tip.length = 0.01) +
+  geom_bracket(xmin = "CtrlJuv", xmax = "MaleFF", y.position = 194, label = "**",
+               tip.length = 0.01)
+ 
+
+p$layers <- p$layers[-1]
+p
+
+ggsave(filename = "Fig2a-SealGroup-richness.png", dpi = 700, width = 12, height = 10, units = "cm" )
+
+```
+
+
+Do the same for the shannon diversity
+```{r}
+p2 <- plot_richness(SOphy_clean, x="DemoCat", measures = "Shannon") +
+   geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Seal group") +
+  ylab("Shannon diversity") +
+  geom_bracket(xmin="CtrlAd", xmax="InRegAd", y.position = 4.8,
+               label = "**", tip.length = 0.02) +
+  geom_bracket(xmin = "CtrlAd", xmax = "MaleFF", y.position = 5, label = "**",
+               tip.length = 0.02)
+p2
+p2$layers <- p2$layers[-1]
+p2
+ggsave(filename = "Fig2b-SealGroup-Shannon.png", dpi = 700, width = 12, height = 10, units = "cm" )
+
+
+```
+
+```{r}
+p3 <- plot_richness(CombinedPhy, x="DemoCat",measures ="Shannon") +
+   geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Seal group/Salmon") +
+  ylab("Shannon diversity") +
+  geom_bracket(xmin="CtrlAd", xmax="Salmon", y.position = 5.8,
+               label = "***", tip.length = 0.02) #+
+  #geom_bracket(xmin = "CtrlAd", xmax = "MaleFF", y.position = 5, label = "**", tip.length = 0.02)
+p3
+p3$layers <- p3$layers[-1]
+p3
+ggsave(filename = "SealGroup-Salmon-Shannon.png", dpi = 700, width = 12, height = 10, units = "cm" )
+
+```
+
+
+```{r}
+p3 <- plot_richness(CombinedPhy, x="DemoCat",measures ="Observed") +
+   geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Seal group/Salmon") +
+  ylab("ASV richness") #+
+  #geom_bracket(xmin="CtrlAd", xmax="Salmon", y.position = 5.8,
+               #label = "***", tip.length = 0.02) #+
+  #geom_bracket(xmin = "CtrlAd", xmax = "MaleFF", y.position = 5, label = "**", tip.length = 0.02)
+p3
+p3$layers <- p3$layers[-1]
+p3
+ggsave(filename = "Fig2a-SealGroup-Salmon-Richness.png", dpi = 700, width = 12, height = 10, units = "cm" )
+```
+
+
+Do the same by region, sampletype, ageclass, animal status for supplemental material
+```{r}
+p3 <- plot_richness(SOphy_clean, x="Region", measures = "Observed") +
+    geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Region") +
+  ylab("ASV richness") 
+
+p3$layers <- p3$layers[-1]
+p3
+
+ggsave(filename = "Region-richness.tiff", dpi = 700, width = 12, height = 10, units = "cm" )
+
+p4 <- plot_richness(SOphy_clean, x="Region", measures = "Shannon") +
+   geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Region") +
+  ylab("Shannon diversity") 
+p4
+p4$layers <- p4$layers[-1]
+p4
+ggsave(filename = "Region-Shannon.tiff", dpi = 700, width = 12, height = 10, units = "cm" )
+
+```
+
+sampletype
+```{r}
+p5 <- plot_richness(SOphy_clean, x="SampleType", measures = "Observed") +
+    geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Sample type") +
+  ylab("ASV richness") 
+
+p5$layers <- p5$layers[-1]
+p5
+
+ggsave(filename = "Stype-richness.tiff", dpi = 700, width = 12, height = 10, units = "cm" )
+
+p6 <- plot_richness(SOphy_clean, x="SampleType", measures = "Shannon") +
+   geom_boxplot(outlier.size=2, outlier.shape = 21) +
+   theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  theme(strip.text.x = element_blank()) +
+  xlab("Sample type") +
+  ylab("Shannon diversity") 
+p6
+p6$layers <- p6$layers[-1]
+p6
+ggsave(filename = "Stype-Shannon.tiff", dpi = 700, width = 12, height = 10, units = "cm" )
+```
+
+importing into vegan to run statistics on alpha diversity differences between variable groups
+```{r}
+library(vegan)
+veganotu = function(physeq) {
+    require("vegan")
+    OTU = otu_table(physeq)
+    if (taxa_are_rows(OTU)) {
+        OTU = t(OTU)
+    }
+    return(as(OTU, "matrix"))
+}
+
+SOasv.mat <- veganotu(SOphy_clean)
+
+```
+```{r statistics}
+metadata <- as(sample_data(SOphy_clean), "data.frame")
+
+metadata$sample_rich <- diversity(SOasv.mat)
+
+adonis(distance(SOphy_clean, method = "bray") ~ DemoCat, data = metadata) #p 0.001
+adonis(distance(SOphy_clean, method = "bray") ~ Region, data = metadata) #p 0.001
+adonis(distance(SOphy_clean, method = "bray") ~ AdJuv, data = metadata) # p 0.001
+adonis(distance(SOphy_clean, method = "bray") ~ AnimalStatus, data = metadata) # p 0.001
+adonis(distance(SOphy_clean, method = "bray") ~ DemoCat + AnimalStatus, data = metadata)
+adonis(distance(SOphy_clean, method = "bray") ~ DemoCat + month + AnimalStatus + Region, data = metadata)
+
+```
+
+
+
+Plotting beta diversity:
+
+```{r color pallette for ordination plots}
+groupcolors <- natparks.pals("Yellowstone")
+```
+
+
+Bray-curtis PCoA
+```{r}
+SO_bc_mat <- as.matrix(distance(SOphy_clean, method="bray"))
+SO_bc <- distance(SOphy_clean, method="bray")
+
+ord <- ordinate(SOphy_clean, "PCoA", "bray")
+ordn <- ordinate(SOphy_clean, "NMDS", "bray")
+plot_ordination(SOphy_clean, ordn, color="DemoCat", shape="AnimalStatus") +
+  geom_point(size=3) +
+  scale_color_manual(values = groupcolors) +
+  theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  labs(color="Seal Groups") +
+  labs(shape="Animal status/sample type")
+
+ggsave("Fig3-Seal-bray-curtis-NMDS.png", dpi = 700, width = 22, height = 16, units = "cm")
+```
+
+
+```{r}
+ord2 <- ordinate(CombinedPhy, "PCoA", "bray")
+bc2 <- plot_ordination(CombinedPhy, ord2, color="DemoCat", shape="Sample_Species") +
+  geom_point(size=3) +
+  theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  labs(color="Groups") +
+  labs(shape="Species")
+bc2
+
+ord2n <- ordinate(CombinedPhy, "NMDS", "bray")
+
+plot_ordination(CombinedPhy, ord2n, color="DemoCat", shape="Sample_Species") +
+  geom_point(size=3) +
+  scale_color_manual(values = groupcolors) +
+  theme_bw() +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())+
+  labs(color="Groups") +
+  labs(shape="Species")
+
+ggsave("Fig8-SealSalmon-NMDS.png", dpi = 700, width = 22, height = 16, units = "cm")
+```
+
+```{r}
+library(NatParksPalettes)
+names(NatParksPalettes)
+
+natparks.pals("Arches") -> Arches
+natparks.pals("Olympic") -> Olymp
+natparks.pals("RockyMtn") -> RM
+natparks.pals("Yellowstone") -> YS
+natparks.pals("SouthDowns") -> SD
+natparks.pals("Volcanoes") -> Val
+
+pal1 <- c(Arches, Olymp, RM, YS)
+pal2 <- c(Arches, Olymp, RM, YS, SD)
+pal3 <- c(Arches, Olymp, RM, YS, SD, Val)
+
+```
+
+
+Plot the stacked bar charts for the taxonomic proportions 
+```{r}
+total = median(sample_sums(SOphy_clean))
+standf = function(x, t=total) round(t *(x/sum(x)))
+NmSOphy = transform_sample_counts(SOphy_clean, standf)
+
+BactSOphy <- subset_taxa(SOphy_clean, Kingdom=="Bacteria")
+
+ps<- tax_glom(BactSOphy, "Phylum")
+ps0<- transform_sample_counts(ps, function(x) x/ sum(x))
+ps1<- merge_samples(BactSOphy, "DemoCat")
+ps2<- transform_sample_counts(ps1, function(x) x/ sum(x))
+
+#library(RColorBrewer)
+#n <- 60
+#qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+#col_vector = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+
+
+#library(randomcoloR)
+#n <- 50
+#palette <- distinctColorPalette(n)
+
+ps2d <- psmelt(ps2)
+#HowManyPhyla <- length(levels(as.factor(ps2d$Phylum)))
+#getPalette = colorRampPalette(brewer.pal(24, "Set1")) 
+#PhylaPalette = getPalette(HowManyPhyla)
+
+ggplot(ps2d, aes(x = Sample, y=Abundance, factor(Phylum), fill=factor(Phylum)))+
+  geom_bar(stat="identity", position="stack") +
+  scale_fill_manual(values = c(pal1))+
+  labs(fill= "Phylum") +
+  theme_bw()+ 
+    theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())
+ 
+ggsave("Fig4-Seal-phylum-relativeabundace.png", dpi = 700, width = 22, height = 16, units = "cm")
+
+```
+
+make sure the cyanobacteria are legit bacteria and aren't just chloroplasts that haven't been removed
+```{r}
+cySO <- subset_taxa(SOphy_clean, Phylum==" Cyanobacteria")
+
+Cyps1<- merge_samples(cySO, "DemoCat")
+
+plot_bar(Cyps1, fill = "Family")+
+  geom_bar(aes(color=Phylum, fill=Family), stat="identity", position="stack")+
+  theme_bw()+ theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())
+
+#yep, they are out of there
+  
+
+```
+OKay the bacteroidota are the most divergent
+
+```{r}
+BpSOphy <- subset_taxa(SOphy_clean, Phylum==" Bacteroidota")
+
+Bps1<- merge_samples(BpSOphy, "DemoCat")
+Bps2<- transform_sample_counts(Bps1, function(x) x/ sum(x))
+
+Bps2d <- psmelt(Bps2)
+#HowManyFam <- length(levels(as.factor(Bps2d$Family)))
+#getPalette = colorRampPalette(brewer.pal(27, "Set1")) 
+#FamPalette = getPalette(HowManyFam)
+
+ggplot(Bps2d, aes(x = Sample, y=Abundance, factor(Family), fill=factor(Family)))+
+  geom_bar( stat="identity", position="stack")+
+  scale_fill_manual(values = pal1)+
+  guides(fill=guide_legend(ncol=2)) +
+  labs(fill= "Family") +
+  theme_bw()+ theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())
+ 
+ggsave("Fig5-Seal-Bacteroidota-relativeabundace.png", dpi = 700, width = 22, height = 16, units = "cm")
+
+```
+
+
+plot richness for Seal only data at the phylum level first
+```{r}
+tax_glom(SOphy, taxrank="Phylum") %>%
+  sample_richness %>%
+  plot
+```
+
+Let's make a relative abundance plot comparing salmon to the groups of seals at the phylum level
+```{r}
+CombinedPhy
+total = median(sample_sums(CombinedPhy))
+standf = function(x, t=total) round(t *(x/sum(x)))
+NmCombphy = transform_sample_counts(CombinedPhy, standf)
+
+BactCombPhy <- subset_taxa(CombinedPhy, Kingdom=="Bacteria")
+
+Cps<- tax_glom(BactCombPhy , "Phylum")
+Cps0<- transform_sample_counts(Cps, function(x) x/ sum(x))
+Cps1<- merge_samples(BactCombPhy , "DemoCat")
+Cps2<- transform_sample_counts(Cps1, function(x) x/ sum(x))
+
+Cps2d <- psmelt(Cps2)
+
+ggplot(Cps2d, aes(x = Sample, y=Abundance, factor(Phylum), fill=factor(Phylum)))+
+  geom_bar(stat="identity", position="stack") +
+  scale_fill_manual(values = c(pal2))+
+  labs(fill= "Phylum") +
+  theme_bw()+ 
+    theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())
+ 
+ggsave("Fig7-Combined-phylum-relativeabundace.png", dpi = 700, width = 22, height = 16, units = "cm")
+```
+
+```{r Bacteroidota families in all samples}
+BpComphy <- subset_taxa(CombinedPhy, Phylum==" Bacteroidota")
+
+BCps1<- merge_samples(BpComphy, "DemoCat")
+BCps2<- transform_sample_counts(BCps1, function(x) x/ sum(x))
+
+BCps2d <- psmelt(BCps2)
+#HowManyFam <- length(levels(as.factor(Bps2d$Family)))
+#getPalette = colorRampPalette(brewer.pal(27, "Set1")) 
+#FamPalette = getPalette(HowManyFam)
+
+ggplot(BCps2d, aes(x = Sample, y=Abundance, factor(Family), fill=factor(Family)))+
+  geom_bar( stat="identity", position="stack")+
+  scale_fill_manual(values = pal3)+
+  guides(fill=guide_legend(ncol=2)) +
+  labs(fill= "Family") +
+  theme_bw()+ theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())
+ 
+ggsave("Fig9-Combined-Bacteroidota-relativeabundace.png", dpi = 700, width = 22, height = 16, units = "cm")
+```
+
+
+ANCOM analysis 
+need to import an otu/feature table - we will use the ASV tables from both seals only data and seals and salmon
+
+Load necessary libraries
+```{r}
+library(exactRankTests)
+library(nlme)
+library(dplyr)
+library(ggplot2)
+library(compositions)
+library(readr)
+library(tidyverse)
+```
+Make sure the script for the ANCOM analysis ANCOM.R.2 by Frederick Huang is in your working directory or link it with code from his GitHub repository then load the script into your workspace.
+```{r}
+source("ancom_v2.1.R")
+```
+
+Following the Read.me file from the ANCOM.R.2 documentation use the appropriate OTU/ASV table and the corresponding Metadata file
+```{r}
+otu_data = ASV_ASFdf
+#otu_data = cbind(ASV.id = rownames(otu_data), otu_data)
+#otu_id <- otu_data$ASV.id
+otu_data = data.frame(otu_data, check.names = FALSE)
+#rownames(otu_data) = otu_data$ASV.id
+
+meta_data = SOmetadata
+meta_data <- meta_data[-c(1), ]
+meta_data = meta_data %>% rename(Sample.ID = 'sample-id')
+
+```
+
+create the feature table for ANCOM
+
+```{r}
+feature_table = otu_data; sample_var = "Sample.ID"; group_var = NULL 
+```
+
+#due to the number of samples per individual the use of a group to determine differentially abund taxa based on structural zeros led to identification of non significantly representative OTUs
+
+```{r}
+out_cut = 0.05; zero_cut = 0.99; lib_cut = 0; neg_lb = TRUE
+prepro = feature_table_pre_process(feature_table, meta_data, sample_var, group_var, 
+                                   out_cut, zero_cut, lib_cut, neg_lb)
+feature_table = prepro$feature_table # Preprocessed feature table
+meta_data = prepro$meta_data # Preprocessed metadata
+struc_zero = prepro$structure_zeros # Structural zero info
+```
+
+run the ancom with the main variable as demographic group while accounting for variability associated with AdJuv and random variability
+
+```{r}
+main_var = "DemoCat"; p_adj_method = "BH"; alpha = 0.05
+adj_formula = "AnimalStatus" ; rand_formula = NULL
+t_start = Sys.time()
+res = ANCOM(feature_table, meta_data, struc_zero, main_var, p_adj_method, 
+            alpha, adj_formula, rand_formula)
+t_end = Sys.time()
+t_run = t_end - t_start
+
+write_csv(res$out, "SealsOnly-DemoCat-AnimalStatus-ANCOM.csv")
+
+```
+
+visualise the volcano plot of the output
+
+```{r}
+n_taxa = ifelse(is.null(struc_zero), nrow(feature_table), sum(apply(struc_zero, 1, sum) == 0))
+# Cutoff values for declaring differentially abundant taxa
+cut_off = c(0.9 * (n_taxa -1), 0.8 * (n_taxa -1), 0.7 * (n_taxa -1), 0.6 * (n_taxa -1))
+names(cut_off) = c("detected_0.9", "detected_0.8", "detected_0.7", "detected_0.6")
+
+# Annotation data
+dat_ann = data.frame(x = min(res$fig$data$x), y = cut_off["detected_0.6"], label = "W[0.6]")
+
+fig = res$fig +
+  geom_hline(yintercept = cut_off["detected_0.6"], linetype = "dashed") +
+  geom_text(data = dat_ann, aes(x = x, y = y, label = label),
+            size = 4, vjust = -0.5, hjust = 0, color = "orange", parse = TRUE)
+fig
+```
+
+
+taxonomy of ANCOM ASVs
+Pull out the ASVs from the SILVA taxtable
+Pull out the ASVs from the Blastout with the isolate DB
+```{r}
+Sealseq_blast <- read.csv(here('seal-rep-sequences.sig.blastout_fixed.csv'))
+iso_blast_1 <- read.csv(here('Strain_BLAST_ID_13062019.csv'))
+iso_blast_2 <- read.csv(here('Strain_BLAST_ID_2.csv'))
+seal_ANCOM <- read.csv(here('ANCOM_Seals_sig_hashes.csv'))
+seal_ANCOM %>%
+  rename(Feature.ID = taxa_id) -> seal_ANCOM
+
+#modify the taxtable from SILVA
+SOtaxtable -> tmp_taxtable
+tmp_taxtable$Kingdom <- gsub("d__","",as.character(tmp_taxtable$Kingdom))
+tmp_taxtable$Phylum <- gsub("p__","",as.character(tmp_taxtable$Phylum))
+tmp_taxtable$Class <- gsub("c__","",as.character(tmp_taxtable$Class))
+tmp_taxtable$Order <- gsub("o__","",as.character(tmp_taxtable$Order))
+tmp_taxtable$Family <- gsub("f__","",as.character(tmp_taxtable$Family))
+tmp_taxtable$Genus <- gsub("g__","",as.character(tmp_taxtable$Genus))
+tmp_taxtable$Species <- gsub("s__","",as.character(tmp_taxtable$Species))
+
+tmp_taxtable$SILVAtax <- paste(tmp_taxtable$Kingdom, tmp_taxtable$Phylum, tmp_taxtable$Class, tmp_taxtable$Order, tmp_taxtable$Family, tmp_taxtable$Genus, tmp_taxtable$Species, sep = ";")
+
+tmp_taxtable %>%
+  select(Feature.ID, SILVAtax, Confidence) -> tax_silva_seals
+```
+
+so there are some that are duplicated between the two Stain_BLAST_ID dfs so we have to combine them and 
+```{r}
+iso_blast <- rbind(iso_blast_1,iso_blast_2)
+iso_blast %>%
+  rename(similarity = Similarity...) -> iso_blast
+#pull out the ones that are unique refseqid
+iso_blast %>%
+  distinct(refseqid, .keep_all = TRUE) -> uniq_iso
+
+iso_blast %>%
+  group_by(refseqid) %>%
+  filter(n() >1) -> dup_iso
+
+dup_iso %>%
+  group_by(refseqid) %>%
+  slice_max(similarity) -> sub_iso
+
+#recombine them 
+iso_blast_tmp <- rbind(uniq_iso, sub_iso)
+
+iso_blast %>% 
+  group_by(refseqid) %>%
+  slice_max(similarity) -> iso_blast
+
+iso_blast_tmp %>%
+  group_by(refseqid) %>%
+  slice_max(similarity) -> iso_blast_tmp
+ 
+#there are still duplicates, they have the same similarity %
+iso_blast_tmp %>%
+ unique() -> iso_tmp_un # now matches iso_blast
+
+iso_blast %>%
+  distinct(refseqid, .keep_all = TRUE) -> distinct_check
+
+#find the one duplicate and deal with it
+iso_blast %>%
+  group_by(refseqid) %>%
+  filter(n() >1) -> duplicates
+#check that the one with the higher max score is the one that got selected
+#it did, so we can move forward with the isoblast table now
+
+```
+
+
+merge the taxonomy with the ANCOM blast to the iso DB and get 
+```{r}
+dRef <- distinct(iso_blast, refseqid) #347 isolates
+dseq <- distinct(Sealseq_blast, qseqid) #336 which matches the seal_ANCOM 
+dseqiso <- distinct(Sealseq_blast, refseqid) #138 so only 138
+
+ANCOM_iso_blast <- left_join(Sealseq_blast, iso_blast, by='refseqid')
+ANCOM_silva_assign <- merge(seal_ANCOM, tax_silva_seals, by="Feature.ID")
+
+#find number of unique qseqids
+unique(ANCOM_iso_blast$qseqid)
+#335
+
+#select the best hit ID for the blast out
+ANCOM_iso_blast %>%
+  group_by(qseqid) %>%
+  slice_max(pident) -> tmp_assign
+
+#there are some that have the same max pident therefore need to take least common ancestor
+
+```
+
+```{r}
+library(taxonomizr)
+custom2.lca <- function (df) {df %>%  # this function allows to change cutoff parameters for a specified dataframe (df)
+  group_by(qseqid) %>%
+  select(Kingdom, Phylum, Class, Order, Family, Genus, Species) %>%
+  nest() %>% # for each query, calculate the agreed taxonomy
+  # ungroup %>% slice (1:10) %>%
+  mutate(consensus = purrr::map(data,  function(.x) { 
+    # If there are 100% matches - keep those and the 90s
+    # If not, keep everything
+.x %>% 
+  condenseTaxa() %>%
+     paste(., collapse = ";")}
+                               )) %>%
+  select(qseqid, consensus) %>%
+  unnest(consensus)} 
+```
+
+now use the lca script to collapse the top hits to one taxonomic assignment
+```{r}
+tmp_multi <- custom2.lca(tmp_assign)
+#make sure there are 336 hashes still - there is
+#merge consensus onto the tmp_assign so we maintain the pident
+inner_join(tmp_multi, tmp_assign, by = "qseqid") -> ANCOM_iso_blast_consensus
+ANCOM_iso_blast_consensus %>%
+  group_by(qseqid) %>%
+  slice_head(n=1) -> final_assign
+
+#okay there are still 336 hashes, now select only the rows we need to compare the SILVA to isolate blast
+
+final_assign %>%
+  select(qseqid, consensus, refseqid, pident) %>%
+  rename(Feature.ID = qseqid) -> ANCOM_iso_final_assign
+
+```
+
+now we need to merge the SILVA taxonomic assignment and the iso_final_assign and only keep the 305 hashes that were found via the ANCOM in order to compare the assignments and chose the better assignment for the final tables/heatmap
+```{r}
+inner_join(ANCOM_iso_final_assign, tax_silva_seals, by = "Feature.ID") -> tax_compare
+#so the pident is in % and the confidence is in numeric, we need to make them the same
+tax_compare$SILVAconfidence <- tax_compare$Confidence * 100
+tax_compare %>%
+  select(!Confidence) -> tax_compare
+
+
+
+tax_compare %>%
+  select(Feature.ID,consensus,pident,SILVAtax,SILVAconfidence) -> tax_final_both
+
+tax_final_both$diff <- tax_final_both$pident - tax_final_both$SILVAconfidence
+
+tax_final_both %>%
+  mutate(DB_select = case_when(diff >0 ~ "isolate",
+                              diff <0 ~ "SILVA",
+                              diff ==0 ~ "LCA")) -> tax_both_select
+
+#look for any LCA assignments to deal with
+tax_both_select %>%
+  filter(DB_select == "LCA") -> tax_to_LCA
+#there were none so we can just select the proper assignment
+tax_both_select %>%
+  filter(DB_select == "isolate") %>%
+  mutate(taxonomy = consensus) -> tax_iso
+
+tax_both_select %>%  
+  filter(DB_select == "SILVA") %>%
+  mutate(taxonomy = SILVAtax) -> tax_silva
+  
+rbind(tax_iso, tax_silva) -> tax_ANCOM_final
+#remove the colums we don't need
+tax_ANCOM_final %>%
+  select(Feature.ID, taxonomy) -> tax_ANCOM_final
+#this is now what we need to bind to the ANCOM results and figure out which ones are associated with the males that the farms, we still have the 336 correct number of hashes
+
+
+```
+
+bind the taxonomy onto the ANCOM results
+```{r}
+inner_join(seal_ANCOM, tax_ANCOM_final, by = "Feature.ID") -> ANCOM_tax
+
+```
+
+need to sum the reads for each ASV by metadata variables
+```{r}
+#make a long tibble of ASV table and bind to the metadata then sum
+library(tibble)
+ASV_ASFdf -> tmp
+tmp <- cbind(Feature.ID = rownames(tmp), tmp)
+row.names(tmp) = NULL
+
+tmp %>% 
+  as.data.frame() %>%
+  pivot_longer(!Feature.ID, names_to = "sample-id", values_to = "reads")-> tmp_long
+
+tmp_long$reads <- as.numeric(tmp_long$reads)
+
+tmp_meta <- SOmetadata[-1,]
+    
+merge(tmp_meta, tmp_long, by = "sample-id") -> ASVmeta_long
+```
+
+sum counts of ASVs by group
+```{r counts of ASVs}
+ASVmeta_long %>%
+  group_by(DemoCat, Feature.ID) %>%
+  summarise(reads = sum(reads)) -> DemoCat_reads
+
+# calc proportions of each ASV in the groups
+ASVmeta_long %>%
+  group_by(DemoCat, Feature.ID) %>%
+  summarise(reads = sum(reads)) %>%
+  mutate(prop = reads / sum(reads)) %>%
+  select(Feature.ID, DemoCat, prop) -> DemoCat_props
+
+#now pivot back to wide so we can merge with the ANCOM results
+DemoCat_reads %>%
+  pivot_wider(names_from = DemoCat, values_from = reads) -> DC_reads
+
+DemoCat_props %>%
+  pivot_wider(names_from = DemoCat, values_from = prop) -> DC_props
+
+#now join the ANCOM with tax with the sums based on DemoCat
+inner_join(ANCOM_tax, DC_reads, by = "Feature.ID") -> ANCOM_Demo
+inner_join(ANCOM_tax, DC_props, by = "Feature.ID") -> ANCOM_Demo_prop
+
+#maybe save this as a CSV
+write.csv(ANCOM_Demo, "ANCOM_by_SealGroup.csv", row.names = FALSE)
+```
+
+need to pull out the ones that are more abundant in males in farms
+```{r ASVs most abundant in Males from farms}
+#need to pull out only the columns of counts and the ASV IDs
+ANCOM_Demo %>% 
+  select(Feature.ID,MaleFF,InRegAd,CtrlAd,CtrlJuv) %>%
+  remove_rownames %>%
+  column_to_rownames(var="Feature.ID") %>%
+  mutate(high_group = pmap(across(everything()), ~ names(c(...)[which.max(c(...))]))) %>%
+  rownames_to_column(var="Feature.ID") %>%
+  select(Feature.ID,high_group) -> Reads_by_group
+
+#Reads_by_group$high_group <- factor(Reads_by_group$high_group)
+
+#now merge this with the full table of ANCOM results with tax
+merge(ANCOM_Demo,Reads_by_group, by="Feature.ID") -> ANCOM_Demo2
+
+#filter out the ones with counts highest in Males at FF
+ANCOM_Demo2 %>%
+  filter(high_group == "MaleFF") -> ANCOM_FF
+#there are 80 which are associated with males at FF so let's keep them all for the heatmap
+ANCOM_Demo2 %>%
+  filter(high_group == "InRegAd") -> ANCOM_InReg
+#there are 104 which are associated with in region adults
+
+```
+
+
+```{r}
+#need to pull out only the columns of counts and the ASV IDs
+ANCOM_Demo_prop %>% 
+  select(Feature.ID,MaleFF,InRegAd,CtrlAd,CtrlJuv) %>%
+  remove_rownames %>%
+  column_to_rownames(var="Feature.ID") %>%
+  mutate(high_group = pmap(across(everything()), ~ names(c(...)[which.max(c(...))]))) %>%
+  rownames_to_column(var="Feature.ID") %>%
+  select(Feature.ID,high_group) -> Props_by_group
+
+#Reads_by_group$high_group <- factor(Reads_by_group$high_group)
+
+#now merge this with the full table of ANCOM results with tax
+merge(ANCOM_Demo_prop,Props_by_group, by="Feature.ID") -> ANCOM_DemoProp2
+
+#filter out the ones with counts highest in Males at FF
+ANCOM_DemoProp2 %>%
+  filter(high_group == "MaleFF") -> ANCOM_FF_prop
+#there are 80 which are associated with males at FF so let's keep them all for the heatmap
+ANCOM_DemoProp2 %>%
+  filter(high_group == "InRegAd") -> ANCOM_InReg_prop
+```
+
+
+making a heatmap directly from the ANCOM results filtered for the table
+```{r heatmap for ASVs most abundant in males at farms}
+library(ggplot2)
+
+#install.packages("viridis")
+library(viridis)
+
+#need to collapse the taxonomy to phylum and lowest rank identified
+ANCOM_FF %>%
+  separate(taxonomy, c('Kingdom','Phylum','Class',
+                       'Order','Family','Genus','Species'), sep = ";") -> tmp3
+
+#fix the orthinobacterium, as this was a bad assignment (at about 80%) and we know this can't live live in a seal and is likely another bacterium similar to those we cultured in the same family
+tmp3$Genus[tmp3$Genus=="Ornithobacterium"]<-"uncultured"
+tmp3$Species[tmp3$Genus=="unclassified Weeksellaceae genus"]<-"cultured isolate"
+#now we need to get rid of the kingdom info and make a column with just Phylum;lowest rank
+tmp3 %>%
+  select(!Kingdom) %>%
+  select(!Class) -> tmp4
+#those with species
+tmp4 %>%
+  filter(!str_detect(Species, "NA")) %>%
+  filter(!str_detect(Species, "uncultured")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  filter(!str_detect(Species, "cultured isolate")) -> tmp5
+tmp5 %>%
+  mutate(taxon = Species) -> Splevel
+
+anti_join(tmp4, tmp5, by = "Feature.ID") -> tmp6
+#now the uncultured ones
+tmp6 %>%
+  filter(!str_detect(Species, "NA")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  filter(!str_detect(Genus, "uncultured")) ->  tmp7
+tmp7$taxon <- paste(tmp7$Genus, tmp7$Species, sep = ";")
+
+anti_join(tmp6,tmp7, by = "Feature.ID") ->tmp8
+tmp8 %>%
+  filter(!str_detect(Family, "uncultured")) %>%
+  filter(!str_detect(Genus,"uncultured")) %>%
+  filter(!str_detect(Genus, "NA")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  mutate(taxon = Genus)-> Glevel
+
+anti_join(tmp8,Glevel, by = "Feature.ID") ->tmp9
+
+tmp9 %>%
+  filter(str_detect(Genus, "NA")) %>%
+  mutate(taxon = Family) -> Flevel
+anti_join(tmp9,Flevel, by = "Feature.ID") ->tmp10
+tmp10 %>%
+  filter(!str_detect(Family, "uncultured")) %>%
+  filter(!str_detect(Genus, "uncultured"))->tmp11
+tmp11$taxon <- paste(tmp11$Genus, tmp11$Species, sep = ";")
+#combine the ones made so far
+rbind(Splevel,Glevel,Flevel,tmp11,tmp7) -> ANCOM_taxon
+
+anti_join(tmp4, ANCOM_taxon, by = "Feature.ID") -> tmp12
+tmp12 %>%
+  filter(!str_detect(Family, "uncultured")) ->tmp13
+tmp13$taxon <- paste(tmp13$Family, tmp13$Species, sep = ";")  
+
+rbind(ANCOM_taxon,tmp13) -> ANCOM_taxon
+anti_join(tmp4, ANCOM_taxon, by = "Feature.ID") -> tmp14
+tmp14$taxon <- paste(tmp14$Order, tmp14$Species, sep = ";")
+rbind(ANCOM_taxon,tmp14) -> ANCOM_taxon
+ANCOM_taxon %>%
+  filter(str_detect(taxon, "SR1_bacterium")) -> tmp15
+tmp15$taxon <- paste(tmp15$Genus, tmp15$Species, sep = ";")
+anti_join(ANCOM_taxon, tmp15, by = "Feature.ID") -> ANCOM_taxon
+
+ANCOM_taxon %>%
+  filter(str_detect(taxon, "H1")) -> tmp16
+tmp16$taxon <- paste(tmp16$Family, tmp16$taxon, sep = ";")
+anti_join(ANCOM_taxon, tmp16, by = "Feature.ID") -> ANCOM_taxon
+rbind(ANCOM_taxon, tmp15, tmp16) -> ANCOM_taxon
+
+ANCOM_taxon$taxid <- paste(ANCOM_taxon$Phylum, ANCOM_taxon$taxon, sep = ";")
+
+ANCOM_taxon %>%
+  filter(detected_0.7 == TRUE) -> ANCOM_FF70
+
+ANCOM_FF70 %>% 
+  as.data.frame() %>%
+  select(taxid,MaleFF,InRegAd,CtrlAd,CtrlJuv) %>%
+  #rownames_to_column("taxa.id") %>%
+  pivot_longer(-c(taxid), names_to = "sealgroup", values_to = "counts") %>%
+  mutate(sealgroup= fct_relevel(sealgroup,colnames(ANCOM_FF))) %>%
+  ggplot(aes(x=sealgroup, y=taxid, fill=counts)) + 
+    theme(axis.text.y = element_text(size=8, face = 'italic'),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),   strip.background = element_rect(colour = "black", fill = "white"),
+        strip.text = element_text(face = "bold", size = 12),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 14, face = "bold"),
+          panel.background = element_rect(fill = "White"),
+        panel.grid.major = element_line(colour = "white"), 
+        panel.grid.minor = element_line(colour = "white"))+
+  geom_raster() + 
+  scale_fill_viridis(option="magma", direction = -1)
+
+ggsave(filename = "MaleFF70AncomHM.png", width = 10, height = 10, dpi = 150)
+
+
+
+```
+```{r heatmap looking at in Region animals}
+ANCOM_InReg_prop %>%
+  separate(taxonomy, c('Kingdom','Phylum','Class',
+                       'Order','Family','Genus','Species'), sep = ";") -> tmp03
+
+#fix the orthinobacterium, as this was a bad assignment (at about 80%) and we know this can't live live in a seal and is likely another bacterium similar to those we cultured in the same family
+tmp03$Genus[tmp3$Genus=="Ornithobacterium"]<-"uncultured"
+tmp03$Species[tmp3$Genus=="unclassified Weeksellaceae genus"]<-"cultured isolate"
+#now we need to get rid of the kingdom info and make a column with just Phylum;lowest rank
+tmp03 %>%
+  select(!Kingdom)-> tmp04
+
+#those with species
+tmp04 %>%
+  filter(!str_detect(Species, "NA")) %>%
+  filter(!str_detect(Species, "uncultured")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  filter(!str_detect(Species, "cultured isolate")) -> tmp05
+tmp05 %>%
+  mutate(taxon = Species) -> Splevel
+
+anti_join(tmp04, tmp05, by = "Feature.ID") -> tmp06
+#now the uncultured ones
+tmp06 %>%
+  filter(!str_detect(Species, "NA")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  filter(!str_detect(Genus, "uncultured")) ->  tmp07
+tmp07$taxon <- paste(tmp07$Genus, tmp07$Species, sep = ";")
+
+anti_join(tmp06,tmp07, by = "Feature.ID") ->tmp08
+tmp08 %>%
+  filter(!str_detect(Family, "uncultured")) %>%
+  filter(!str_detect(Genus,"uncultured")) %>%
+  filter(!str_detect(Genus, "NA")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  mutate(taxon = Genus)-> Glevel
+
+anti_join(tmp08,Glevel, by = "Feature.ID") ->tmp09
+
+tmp09 %>%
+  filter(str_detect(Genus, "NA")) %>%
+  filter(!str_detect(Family, "NA")) %>%
+  mutate(taxon = Family) -> Flevel
+anti_join(tmp09,Flevel, by = "Feature.ID") ->tmp010
+
+tmp010 %>%
+  filter(!str_detect(Family, "uncultured")) %>%
+  filter(!str_detect(Genus, "uncultured")) %>%
+  filter(!str_detect(Order, "NA")) %>%
+  mutate(taxon = Order) -> Olevel
+
+tmp011$taxon <- paste(tmp11$Genus, tmp11$Species, sep = ";")
+#combine the ones made so far
+rbind(Splevel,Glevel,Flevel,Olevel,tmp07) -> ANCOM_taxon2_propIR
+
+anti_join(tmp04, ANCOM_taxon2_propIR, by = "Feature.ID") -> tmp012
+tmp012 %>%
+ mutate(taxon = Class) -> Clevel
+
+rbind(ANCOM_taxon2_propIR,Clevel) -> ANCOM_taxon2_propIR
+
+
+ANCOM_taxon2_propIR$taxid <- paste(ANCOM_taxon2_propIR$Phylum, ANCOM_taxon2_propIR$taxon, sep = ";")
+
+ANCOM_taxon2_propIR %>%
+  filter(detected_0.7 == TRUE) -> ANCOM_InregProp70
+
+ANCOM_InregProp70 %>% 
+  as.data.frame() %>%
+  select(taxid,MaleFF,InRegAd,CtrlAd,CtrlJuv) %>%
+  #rownames_to_column("taxa.id") %>%
+  pivot_longer(-c(taxid), names_to = "sealgroup", values_to = "counts") %>%
+  mutate(sealgroup= fct_relevel(sealgroup,colnames(ANCOM_InregProp70))) %>%
+  ggplot(aes(x=sealgroup, y=taxid, fill=counts)) + 
+    theme(axis.text.y = element_text(size=8, face = 'italic'),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),   strip.background = element_rect(colour = "black", fill = "white"),
+        strip.text = element_text(face = "bold", size = 12),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 14, face = "bold"),
+          panel.background = element_rect(fill = "White"),
+        panel.grid.major = element_line(colour = "white"), 
+        panel.grid.minor = element_line(colour = "white"))+
+  geom_raster() + 
+  scale_fill_viridis(option="magma", direction = -1)
+
+ggsave(filename = "Inreg70AncomHMProp.png", width = 10, height = 10, dpi = 150)
+```
+
+Let's make one that uses proportion of reads rather than counts
+```{r heatmap for ASVs most abundant in males at farms}
+library(ggplot2)
+
+#install.packages("viridis")
+library(viridis)
+
+#need to collapse the taxonomy to phylum and lowest rank identified
+ANCOM_FF_prop %>%
+  separate(taxonomy, c('Kingdom','Phylum','Class',
+                       'Order','Family','Genus','Species'), sep = ";") -> tmp3
+
+#fix the orthinobacterium, as this was a bad assignment (at about 80%) and we know this can't live live in a seal and is likely another bacterium similar to those we cultured in the same family
+tmp3$Genus[tmp3$Genus=="Ornithobacterium"]<-"uncultured"
+tmp3$Species[tmp3$Genus=="unclassified Weeksellaceae genus"]<-"cultured isolate"
+#now we need to get rid of the kingdom info and make a column with just Phylum;lowest rank
+tmp3 %>%
+  select(!Kingdom) %>%
+  select(!Class) -> tmp4
+#those with species
+tmp4 %>%
+  filter(!str_detect(Species, "NA")) %>%
+  filter(!str_detect(Species, "uncultured")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  filter(!str_detect(Species, "cultured isolate")) -> tmp5
+tmp5 %>%
+  mutate(taxon = Species) -> Splevel
+
+anti_join(tmp4, tmp5, by = "Feature.ID") -> tmp6
+#now the uncultured ones
+tmp6 %>%
+  filter(!str_detect(Species, "NA")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  filter(!str_detect(Genus, "uncultured")) ->  tmp7
+tmp7$taxon <- paste(tmp7$Genus, tmp7$Species, sep = ";")
+
+anti_join(tmp6,tmp7, by = "Feature.ID") ->tmp8
+tmp8 %>%
+  filter(!str_detect(Family, "uncultured")) %>%
+  filter(!str_detect(Genus,"uncultured")) %>%
+  filter(!str_detect(Genus, "NA")) %>%
+  filter(!str_detect(Species, "metagenome")) %>%
+  mutate(taxon = Genus)-> Glevel
+
+anti_join(tmp8,Glevel, by = "Feature.ID") ->tmp9
+
+tmp9 %>%
+  filter(str_detect(Genus, "NA")) %>%
+  mutate(taxon = Family) -> Flevel
+anti_join(tmp9,Flevel, by = "Feature.ID") ->tmp10
+tmp10 %>%
+  filter(!str_detect(Family, "uncultured")) %>%
+  filter(!str_detect(Genus, "uncultured"))->tmp11
+tmp11$taxon <- paste(tmp11$Genus, tmp11$Species, sep = ";")
+#combine the ones made so far
+rbind(Splevel,Glevel,Flevel,tmp11,tmp7) -> ANCOM_taxon_prop
+
+anti_join(tmp4, ANCOM_taxon_prop, by = "Feature.ID") -> tmp12
+tmp12 %>%
+  filter(!str_detect(Family, "uncultured")) ->tmp13
+tmp13$taxon <- paste(tmp13$Family, tmp13$Species, sep = ";")  
+
+rbind(ANCOM_taxon_prop,tmp13) -> ANCOM_taxon_prop
+anti_join(tmp4, ANCOM_taxon_prop, by = "Feature.ID") -> tmp14
+tmp14$taxon <- paste(tmp14$Order, tmp14$Species, sep = ";")
+rbind(ANCOM_taxon_prop,tmp14) -> ANCOM_taxon_prop
+ANCOM_taxon_prop %>%
+  filter(str_detect(taxon, "SR1_bacterium")) -> tmp15
+tmp15$taxon <- paste(tmp15$Genus, tmp15$Species, sep = ";")
+anti_join(ANCOM_taxon_prop, tmp15, by = "Feature.ID") -> ANCOM_taxon_prop
+
+ANCOM_taxon_prop %>%
+  filter(str_detect(taxon, "H1")) -> tmp16
+tmp16$taxon <- paste(tmp16$Family, tmp16$taxon, sep = ";")
+anti_join(ANCOM_taxon_prop, tmp16, by = "Feature.ID") -> ANCOM_taxon_prop
+rbind(ANCOM_taxon_prop, tmp15, tmp16) -> ANCOM_taxon_prop
+
+ANCOM_taxon_prop$taxid <- paste(ANCOM_taxon_prop$Phylum, ANCOM_taxon_prop$taxon, sep = ";")
+
+ANCOM_taxon_prop %>%
+  filter(detected_0.7 == TRUE) -> ANCOM_FF70_prop
+
+ANCOM_FF70_prop %>% 
+  as.data.frame() %>%
+  select(taxid,MaleFF,InRegAd,CtrlAd,CtrlJuv) %>%
+  #rownames_to_column("taxa.id") %>%
+  pivot_longer(-c(taxid), names_to = "sealgroup", values_to = "counts") %>%
+  mutate(sealgroup= fct_relevel(sealgroup,colnames(ANCOM_FF_prop))) %>%
+  ggplot(aes(x=sealgroup, y=taxid, fill=counts)) + 
+    theme(axis.text.y = element_text(size=8, face = 'italic'),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank(),   strip.background = element_rect(colour = "black", fill = "white"),
+        strip.text = element_text(face = "bold", size = 12),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 14, face = "bold"),
+          panel.background = element_rect(fill = "White"),
+        panel.grid.major = element_line(colour = "white"), 
+        panel.grid.minor = element_line(colour = "white"))+
+  geom_raster() + 
+  scale_fill_viridis(option="magma", direction = -1)
+
+ggsave(filename = "MaleFF70PropAncomHM.png", width = 10, height = 10, dpi = 150)
+
+
+
+```
+
+
+Alright, so now we need to join the ASVs from the ANCOM with the salmon ASV table
+```{r}
+#first make the Feature.ID a column rather than the row names
+as.data.frame(ASV_Saldf) -> tmpSal
+#now sum the total reads for the salmon ASV table
+tmpSal$sum = rowSums(tmpSal[ , c(1:288)])
+tmpSal <- cbind(Feature.ID = rownames(tmpSal), tmpSal)
+row.names(tmpSal) = NULL 
+
+inner_join(ANCOM_Demo2,tmpSal, by = "Feature.ID") -> ANCOM_Sal_ASV
+
+ANCOM_Sal_ASV %>% 
+  select(Feature.ID, taxonomy, W, detected_0.9, detected_0.8, detected_0.7, detected_0.6, CtrlAd, CtrlJuv, InRegAd, MaleFF, sum) -> ANCOM_Sal_sum
+
+
+
+#make a csv file of this to make a table
+write.csv(ANCOM_Sal_sum, "SalmonASVs_ANCOM.csv", row.names = FALSE)
+
+```
+
+let's pull out the Weeksellaceae ASVs in the salmon microbiomes to see how many reads there are
+```{r}
+subset_taxa(Salphy_clean, Family == " Weeksellaceae") -> Salphy_clean_weeks
+
+plot_bar(Salphy_clean_weeks, fill = "Genus")+
+  geom_bar(aes(color=Genus, fill=Genus), stat="identity", position="stack")+
+  theme_bw()+ theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())
+
+```
+Pull out the taxtable to look at the assignments
+```{r}
+WeekASV = as(otu_table(Salphy_clean_weeks), "matrix")
+if(taxa_are_rows(Salphy_clean_weeks)){WeekASV <- t(WeekASV)}
+WeeASVdf = as.data.frame((WeekASV))
+
+WeekTax = as(tax_table(Salphy_clean_weeks), "matrix")
+WeekTAXdf = as.data.frame(WeekTax)
+```
+
