@@ -1,0 +1,110 @@
+# move all the files into a FASTQ folder
+#in base ubuntu
+mv Sealseqs/**/**/*.fastq.gz /mnt/c/Users/erdag/Seal_tas_micro/FASTQ
+mv SalmonSeqs/**/*.fastq /mnt/c/Users/erdag/Seal_tas_micro/SalmonSeqs/FASTQ
+# To activate this environment, use
+#
+conda activate qiime2-2021.8
+#
+# To deactivate an active environment, use
+#
+conda deactivate
+
+#seal data
+qiime tools import \
+--type 'SampleData[PairedEndSequencesWithQuality]' \
+--input-path /mnt/c/Users/erdag/Seal_tas_micro/SalmonSeqs/FASTQ \
+--input-format CasavaOneEightSingleLanePerSampleDirFmt \
+--output-path ./demux-paired-end.qza
+
+#use this for the salmon data with a manifest .tsv file
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path fastq-manifest.tsv \
+  --output-path ./demux-paired-end.qza \
+  --input-format PairedEndFastqManifestPhred33V2
+
+#use cutadapt to remove primers v1-v3 27f/519r
+qiime cutadapt trim-paired \
+  --i-demultiplexed-sequences demux-paired-end.qza \
+  --p-adapter-f 'AGAGTTTGATCMTGGCTCAG...CAGCMGCCGCGGTAATWC' \
+  --p-adapter-r 'GWATTACCGCGGCKGCTG...CTGAGCCAKGATCAAACTCT' \
+  --p-cores 2 \
+  --o-trimmed-sequences trimmed.qza
+
+
+#(qiime2-2019.4) erin@osiris:~/qiime2-sealmon$#
+qiime demux summarize \
+--i-data trimmed.qza \
+--o-visualization demux-paired-end.qzv
+#Saved Visualization to: demux-paired-end.qzv
+
+#de-noising of paired reads, do before joining using DADA2, can't do it after merging
+#seals - 300 and 260, salmon 295 and 230
+qiime dada2 denoise-paired \
+--i-demultiplexed-seqs trimmed.qza \
+--p-trim-left-f 0 \
+--p-trim-left-r 0 \
+--p-trunc-len-f 295 \
+--p-trunc-len-r 230 \
+--o-representative-sequences rep-seqs-dada2.qza \
+--o-table table.qza \
+--o-denoising-stats stats-dada2.qza
+
+##metadata handling for DADA2
+qiime metadata tabulate \
+--m-input-file stats-dada2.qza \
+--o-visualization stats-dada2.qzv
+
+mv rep-seqs-dada2.qza rep-seqs.qza
+mv table-dada2.qza table.qza
+
+qiime feature-table summarize \
+--i-table table.qza \
+--o-visualization table.qza \
+--m-sample-metadata-file salmon.metadata.tsv
+
+#making a feature table of metadata/rep seqs
+qiime feature-table tabulate-seqs \
+--i-data rep-seqs-dada2.qza \
+--o-visualization rep-seqs.qzv
+
+#making a FastTree
+qiime phylogeny align-to-tree-mafft-fasttree \
+--i-sequences rep-seqs-dada2.qza \
+--o-alignment aligned-rep-seqs.qza \
+--o-masked-alignment masked-alignment-rep-seqs.qza \
+--o-tree unrooted-tree.qza \
+--o-rooted-tree rooted-tree.qza
+
+
+#alpha and beta diversity
+qiime diversity core-metrics-phylogenetic \
+--i-phylogeny rooted-tree.qza \
+--i-table table.qza \
+--p-sampling-depth 1000 \
+--m-metadata-file salmon.metadata.tsv \
+--output-dir core-metrics-results
+
+
+#taxonomy classification
+qiime feature-classifier classify-sklearn \
+--i-classifier /mnt/c/Users/erdag/Seal_tas_micro/silva-138-99-nb-classifier.qza \
+--i-reads rep-seqs-dada2.qza \
+--p-n-jobs 2 \
+--p-reads-per-batch 1000 \
+--o-classification taxonomy.qza
+
+qiime metadata tabulate \
+--m-input-file taxonomy.qza \
+--o-visualization taxonomy.qzv
+
+
+qiime feature-classifier classify-sklearn \
+--i-classifier silva-132-99-nb-classifier.qza \
+--i-reads rep-seqs.qza \
+--o-classification taxonomy.qza
+
+#OTU clustering
+mkdir qiime2-otu-clustering-tutorial
+cd qiime2-otu-clustering-tutorial
