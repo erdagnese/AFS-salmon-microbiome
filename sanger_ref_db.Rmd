@@ -1,0 +1,22 @@
+---
+title: "sequence_db_creation"
+author: "Erin D'Agnese"
+date: "4/26/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(Biostrings)
+library(here)
+```
+
+```{r import fasta and taxonomy files}
+seqs <- readDNAStringSet(here("isolates.centroids.94.acc.fasta"))
+tax <- read.table(here("isolates.centroids.94_40.acc2tax.csv", header=FALSE))
+```
+
